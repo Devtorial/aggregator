@@ -252,6 +252,9 @@ func unzip(src, dest string) ([]string, error) {
 	return unzippedFiles, nil
 }
 
+// Punted for this method. This would be better if it operated on
+// a channel of filenames. Then the unzip routine could stream
+// the list of files as it gets done unzipping each
 func saveToRedis(filename []string) error {
 	for _, file := range filename {
 		if filepath.Ext(file) != ".xml" {
