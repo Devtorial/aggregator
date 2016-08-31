@@ -14,17 +14,17 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 )
 
 type aggregator struct {
 	RedisServer         string
-	RedisPort           string
+	RedisPort           int
 	RedisPassword       string
-	RedisMaxIdle        string
-	RedisMaxConnections string
+	RedisMaxIdle        int
+	RedisMaxConnections int
+	ConcurrentDownloads int
 }
 
 type document struct {
@@ -54,20 +54,22 @@ type document struct {
 }
 
 var pool *redis.Pool
+var downloadBusy chan bool
 
 func main() {
-	var config *aggregator
-	configReader.ReadFile("aggregator.conf", config)
+	var config aggregator
+	configReader.ReadFile("aggregator.conf", &config)
 
-	if err := aggregate(readURL(), newPool(config.RedisServer, config.RedisPort, config.RedisPassword, config.RedisMaxIdle, config.RedisMaxConnections)); err != nil {
+	if err := aggregate(readURL(), config.ConcurrentDownloads, newPool(config.RedisServer, config.RedisPort, config.RedisPassword, config.RedisMaxIdle, config.RedisMaxConnections)); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func aggregate(url string, redisPool *redis.Pool) error {
+func aggregate(url string, concurrentDownloads int, redisPool *redis.Pool) error {
 	pool = redisPool
 	defer pool.Close()
 
+	downloadBusy = make(chan bool, concurrentDownloads)
 	links, err := getLinks(url)
 	if err != nil {
 		return err
@@ -79,27 +81,25 @@ func aggregate(url string, redisPool *redis.Pool) error {
 	return nil
 }
 
-func newPool(server, port, password, maxIdle, maxConnections string) *redis.Pool {
-	idle, _ := strconv.Atoi(maxIdle)
-	maxConn, _ := strconv.Atoi(maxConnections)
+func newPool(server string, port int, password string, maxIdle, maxConnections int) *redis.Pool {
 	return &redis.Pool{
-		MaxIdle:   idle,
-		MaxActive: maxConn,
+		MaxIdle:   maxIdle,
+		MaxActive: maxConnections,
 		Dial: func() (redis.Conn, error) {
 			if password != "" {
-				return redis.Dial("tcp", fmt.Sprintf("%s:%s", server, port), redis.DialPassword(password))
+				return redis.Dial("tcp", fmt.Sprintf("%s:%d", server, port), redis.DialPassword(password))
 			}
-			return redis.Dial("tcp", fmt.Sprintf("%s:%s", server, port))
+			return redis.Dial("tcp", fmt.Sprintf("%s:%d", server, port))
 		},
 	}
 }
 
 func readURL() string {
-	fmt.Print("Enter the URL to scan (default - http://bitly.com/nuvi-plz):")
+	fmt.Print("Enter the URL to scan (default - http://feed.omgili.com/5Rh5AMTrc4Pv/mainstream/posts/):")
 	scanner := bufio.NewScanner(os.Stdin)
 	scanner.Scan()
 	if scanner.Text() == "" {
-		return "http://bitly.com/nuvi-plz"
+		return "http://feed.omgili.com/5Rh5AMTrc4Pv/mainstream/posts/"
 	}
 	return scanner.Text()
 }
@@ -150,14 +150,18 @@ func downloadUnzipSave(downloadFolder, url string) error {
 	filename := filepath.Join(downloadFolder, url[strings.LastIndex(url, "/"):])
 	outDir := getDir(filename)
 
+	downloadBusy <- true
 	if err := download(url, filename); err != nil {
 		return err
 	}
+	<-downloadBusy
 	unzipped, err := unzip(filename, outDir)
 	if err != nil {
 		return err
 	}
-	saveToRedis(unzipped)
+	if err := saveToRedis(unzipped); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -285,9 +289,10 @@ func writeToRedis(data *document) error {
 	c := pool.Get()
 	defer c.Close()
 
-	// requirement is to be idempotent, so rather than doing what could
-	// be a very expensive LREM on a long list, use key store to keep
-	// track of whether post is added already
+	// requirement is to be idempotent, so if post changes, we need
+	// to delete the old value from the list. Use key store to keep
+	// track of whether post is added already. This is an expensive
+	// way to do this (2x storage). Look into better way
 	v, err := redis.String(c.Do("GET", data.PostURL))
 	if err != nil && err != redis.ErrNil {
 		return err

@@ -12,8 +12,8 @@ import (
 
 func TestAggregate(t *testing.T) {
 	// sucess even though there are no links at this URL
-	err := aggregate("http://www.google.com", newMockPool(nil))
-	if err == nil {
+	err := aggregate("http://www.google.com", 5, newMockPool(nil))
+	if err != nil {
 		t.Error("expected success")
 	}
 }
@@ -21,7 +21,7 @@ func TestAggregate(t *testing.T) {
 func TestReadURL(t *testing.T) {
 	// nothing received from stdin since it defaults to /dev/null
 	url := readURL()
-	if url != "http://bitly.com/nuvi-plz" {
+	if url != "http://feed.omgili.com/5Rh5AMTrc4Pv/mainstream/posts/" {
 		t.Error("expected default")
 	}
 
@@ -45,7 +45,7 @@ func TestGetLinks(t *testing.T) {
 	}
 
 	// success
-	data, err := getLinks("http://bitly.com/nuvi-plz")
+	data, err := getLinks("http://feed.omgili.com/5Rh5AMTrc4Pv/mainstream/posts/")
 	if err != nil || len(data) == 0 {
 		t.Error("expected success on valid url", data)
 	}
@@ -281,7 +281,7 @@ func TestWriteToRedisRealConnection(t *testing.T) {
 		t.SkipNow()
 	}
 
-	pool = newPool("localhost", "6379", "", "80", "12000")
+	pool = newPool("localhost", 6379, "", 80, 12000)
 	err := writeToRedis(&document{XML: "<xmlData>hello world</xmlData>", PostURL: "http://myurl.com/post1234"})
 	if err != nil {
 		t.Error("expected success", err)
