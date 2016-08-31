@@ -10,6 +10,14 @@ import (
 	"time"
 )
 
+func TestAggregate(t *testing.T) {
+	// sucess even though there are no links at this URL
+	err := aggregate("http://www.google.com", newMockPool(nil))
+	if err == nil {
+		t.Error("expected success")
+	}
+}
+
 func TestReadURL(t *testing.T) {
 	// nothing received from stdin since it defaults to /dev/null
 	url := readURL()
@@ -174,14 +182,68 @@ func newMockPool(conn *redigomock.Conn) *redis.Pool {
 }
 
 func TestSaveToRedis(t *testing.T) {
+	// success
 	conn := redigomock.NewConn()
 	pool = newMockPool(conn)
-
-	// different value currently in Key db. Run update
+	xml, _ := ioutil.ReadFile("testData/xml/valid.xml")
 	conn.Command("GET", "http://www.haberler.com/konkoglu-ndan-taziya-ziyareti-8731165-haberi/").Expect("different")
+	conn.Command("SET", "http://www.haberler.com/konkoglu-ndan-taziya-ziyareti-8731165-haberi/", string(xml)).Expect("Success")
+	conn.Command("LREM", "NEWS_XML", -1, "different").Expect("Success")
+	conn.Command("RPUSH", "NEWS_XML", string(xml)).Expect("Success")
 	err := saveToRedis([]string{"testData/xml/valid.xml"})
 	if err != nil {
 		t.Error("expected success", err)
+	}
+
+	// data matches
+	conn = redigomock.NewConn()
+	pool = newMockPool(conn)
+	conn.GenericCommand("GET").Expect(string(xml))
+	err = saveToRedis([]string{"testData/xml/valid.xml"})
+	if err != nil {
+		t.Error("expected success", err)
+	}
+
+	// error on get
+	conn = redigomock.NewConn()
+	pool = newMockPool(conn)
+	conn.GenericCommand("GET").ExpectError(redis.ErrPoolExhausted)
+	err = saveToRedis([]string{"testData/xml/valid.xml"})
+	if err != redis.ErrPoolExhausted {
+		t.Error("expected fail on get", err)
+	}
+
+	// error on set
+	conn = redigomock.NewConn()
+	pool = newMockPool(conn)
+	conn.GenericCommand("GET").Expect("different")
+	conn.GenericCommand("SET").ExpectError(redis.ErrNil)
+	err = saveToRedis([]string{"testData/xml/valid.xml"})
+	if err != redis.ErrNil {
+		t.Error("expected fail on set", err)
+	}
+
+	// error on LREM
+	conn = redigomock.NewConn()
+	pool = newMockPool(conn)
+	conn.GenericCommand("GET").Expect("different")
+	conn.GenericCommand("SET").Expect("success")
+	conn.GenericCommand("LREM").ExpectError(redis.ErrNil)
+	err = saveToRedis([]string{"testData/xml/valid.xml"})
+	if err != redis.ErrNil {
+		t.Error("expected fail on lrem", err)
+	}
+
+	// error on RPUSH
+	conn = redigomock.NewConn()
+	pool = newMockPool(conn)
+	conn.GenericCommand("GET").Expect("different")
+	conn.GenericCommand("SET").Expect("success")
+	conn.GenericCommand("LREM").Expect("success")
+	conn.GenericCommand("RPUSH").ExpectError(redis.ErrNil)
+	err = saveToRedis([]string{"testData/xml/valid.xml"})
+	if err != redis.ErrNil {
+		t.Error("expected fail on rpush", err)
 	}
 
 	// error
@@ -211,5 +273,48 @@ Gaziantep Sanayi Odası (GSO) Yönetim Kurulu Başkanı Adil Konukoğlu , Gazian
 	_, err = parseData("testData/xml/!@#$%^&*()_+?")
 	if err == nil {
 		t.Error("expected error")
+	}
+}
+
+func TestWriteToRedisRealConnection(t *testing.T) {
+	if testing.Short() {
+		t.SkipNow()
+	}
+
+	pool = newPool("localhost", "6379", "", "80", "12000")
+	err := writeToRedis(&document{XML: "<xmlData>hello world</xmlData>", PostURL: "http://myurl.com/post1234"})
+	if err != nil {
+		t.Error("expected success", err)
+	}
+
+	err = writeToRedis(&document{XML: "<xmlData>new world</xmlData>", PostURL: "http://myurl.com/post9876"})
+	if err != nil {
+		t.Error("expected success", err)
+	}
+
+	err = writeToRedis(&document{XML: "<xmlData>updated world</xmlData>", PostURL: "http://myurl.com/post1234"})
+	if err != nil {
+		t.Error("expected success", err)
+	}
+
+	c := pool.Get()
+	defer c.Close()
+	// check list length
+	l, _ := redis.Int(c.Do("LLEN", "NEWS_XML"))
+	if l != 2 {
+		t.Error("expected list length of 2", l)
+	}
+
+	// check values in list
+	vals, _ := redis.Strings(c.Do("LRANGE", "NEWS_XML", 0, 2))
+	if len(vals) != 2 || vals[0] != "<xmlData>new world</xmlData>" || vals[1] != "<xmlData>updated world</xmlData>" {
+		t.Error("expected values", vals)
+	}
+
+	// check values in key value store
+	v1, _ := redis.String(c.Do("GET", "http://myurl.com/post1234"))
+	v2, _ := redis.String(c.Do("GET", "http://myurl.com/post9876"))
+	if v1 != "<xmlData>updated world</xmlData>" || v2 != "<xmlData>new world</xmlData>" {
+		t.Error("expected correct key value values", v1, v2)
 	}
 }

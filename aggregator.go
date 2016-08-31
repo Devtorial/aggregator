@@ -22,6 +22,7 @@ import (
 type aggregator struct {
 	RedisServer         string
 	RedisPort           string
+	RedisPassword       string
 	RedisMaxIdle        string
 	RedisMaxConnections string
 }
@@ -55,27 +56,39 @@ type document struct {
 var pool *redis.Pool
 
 func main() {
-	var config aggregator
-	configReader.ReadFile("aggregator.conf", &config)
+	var config *aggregator
+	configReader.ReadFile("aggregator.conf", config)
 
-	url := readURL()
-	links, err := getLinks(url)
-	if err != nil {
+	if err := aggregate(readURL(), newPool(config.RedisServer, config.RedisPort, config.RedisPassword, config.RedisMaxIdle, config.RedisMaxConnections)); err != nil {
 		log.Fatal(err)
 	}
-	getFiles(links, "downloads")
-
-	pool = newPool(config.RedisServer, config.RedisPort, config.RedisMaxIdle, config.RedisMaxConnections)
-	defer pool.Close()
 }
 
-func newPool(server, port, maxIdle, maxConnections string) *redis.Pool {
+func aggregate(url string, redisPool *redis.Pool) error {
+	pool = redisPool
+	defer pool.Close()
+
+	links, err := getLinks(url)
+	if err != nil {
+		return err
+	}
+	err = getFiles(links, "downloads")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func newPool(server, port, password, maxIdle, maxConnections string) *redis.Pool {
 	idle, _ := strconv.Atoi(maxIdle)
 	maxConn, _ := strconv.Atoi(maxConnections)
 	return &redis.Pool{
 		MaxIdle:   idle,
 		MaxActive: maxConn,
 		Dial: func() (redis.Conn, error) {
+			if password != "" {
+				return redis.Dial("tcp", fmt.Sprintf("%s:%s", server, port), redis.DialPassword(password))
+			}
 			return redis.Dial("tcp", fmt.Sprintf("%s:%s", server, port))
 		},
 	}
@@ -272,16 +285,27 @@ func writeToRedis(data *document) error {
 	c := pool.Get()
 	defer c.Close()
 
-	// key store to keep track of whether added already
+	// requirement is to be idempotent, so rather than doing what could
+	// be a very expensive LREM on a long list, use key store to keep
+	// track of whether post is added already
 	v, err := redis.String(c.Do("GET", data.PostURL))
-	if err != nil {
+	if err != nil && err != redis.ErrNil {
 		return err
 	}
-	// add updated version to List
+
+	// value is different, so update store
 	if v != data.XML {
-		c.Do("SET", data.PostURL, data.XML)
-		c.Do("LREM", "NEWS_XML", v) // remove old data
-		c.Do("RPUSH", "NEWS_XML", data.XML)
+		if _, err := c.Do("SET", data.PostURL, data.XML); err != nil {
+			return err
+		}
+		if v != "" { // only remove if it already exists
+			if _, err := c.Do("LREM", "NEWS_XML", -1, v); err != nil { // remove old data
+				return err
+			}
+		}
+		if _, err := c.Do("RPUSH", "NEWS_XML", data.XML); err != nil {
+			return err
+		}
 	}
 	return nil
 }
