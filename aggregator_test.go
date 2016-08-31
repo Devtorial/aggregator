@@ -1,6 +1,8 @@
 package main
 
 import (
+	"github.com/garyburd/redigo/redis"
+	"github.com/rafaeljusto/redigomock"
 	"io/ioutil"
 	"os"
 	"strconv"
@@ -52,6 +54,7 @@ func TestGetFiles(t *testing.T) {
 		t.SkipNow()
 	}
 
+	pool = newMockPool(nil)
 	//create folder since it doesn't exist
 	err := getFiles([]string{"http://bogusurl/small.zip"}, "testData/newFolder")
 	if err == nil {
@@ -155,4 +158,58 @@ func TestUnzip(t *testing.T) {
 		t.Error("expected no error. already unzipped")
 	}
 	os.RemoveAll("testData/unzip/small")
+}
+
+func newMockPool(conn *redigomock.Conn) *redis.Pool {
+	return &redis.Pool{
+		MaxIdle:   80,
+		MaxActive: 12000,
+		Dial: func() (redis.Conn, error) {
+			if conn != nil {
+				return conn, nil
+			}
+			return redigomock.NewConn(), nil
+		},
+	}
+}
+
+func TestSaveToRedis(t *testing.T) {
+	conn := redigomock.NewConn()
+	pool = newMockPool(conn)
+
+	// different value currently in Key db. Run update
+	conn.Command("GET", "http://www.haberler.com/konkoglu-ndan-taziya-ziyareti-8731165-haberi/").Expect("different")
+	err := saveToRedis([]string{"testData/xml/valid.xml"})
+	if err != nil {
+		t.Error("expected success", err)
+	}
+
+	// error
+	err = saveToRedis([]string{"testData/xml/!@#$%^&*()_+?.xml"})
+	if err == nil {
+		t.Error("expected error")
+	}
+}
+
+func TestParseData(t *testing.T) {
+	topicText := `
+Konkoğlu'ndan Taziya Ziyareti 26 Ağustos 2016 Cuma 16:23 Gaziantep Sanayi Odası (GSO) Yönetim Kurulu Başkanı Adil Konukoğlu, Gaziantep’te terör saldırısında hayatını kaybeden vatandaşların ailelerine taziye ziyaretinde bulunarak, başsağlığı diledi. 
+Gaziantep Sanayi Odası (GSO) Yönetim Kurulu Başkanı Adil Konukoğlu , Gaziantep 'te terör saldırısında hayatını kaybeden vatandaşların ailelerine taziye ziyaretinde bulunarak, başsağlığı diledi.Geçmiş olsun ziyareti için Gaziantep 'e gelen Gümrük ve Ticaret Bakanı Bülent Tüfenkci ile Türkiye Odalar ve Borsalar Birliği ( TOBB ) Başkanı Rifat Hisarcıklıoğlu , geçtiğimiz hafta bir kına gecesinde meydana gelen terör saldırısının gerçekleştirildiği sokağı gezdi. Gaziantep Valisi Ali Yerlikaya, milletvekilleri, Büyükşehir Belediye Başkanı Fatma Şahin ile birlikte BakanTüfenkci'nin programına eşlik eden GSO Başkanı Adil Konukoğlu da saldırının yaşandığı sokakta incelemelerde bulundu. Daha sonra Beybahçe Sosyal Tesisleri'ndeki taziye evine geçen Konkoğlu, terör eyleminde yakınlarını kaybeden ailelere başsağlığı diledi. temennileri iletildi, dualar okundu.Gelin ve damadın ailesiyle de görüşerek üzüntülerini dile getiren GSO Başkanı Adil Konukoğlu , acılarını yürekten hissettiklerini belirterek, "Saldırıda hayatını kaybeden vatandaşlarımıza bir kez daha Allah'tan rahmet, yaralılara acil şifalar diliyorum. Onların her birisi bizim evladımızdı. Üzüntünüzü paylaşıyor, acınızı anlıyoruz. İnşallah bu zor günleri de birlik beraberlik içinde atlatacağız" dedi. - GAZİANTEP 
+`
+	doc, _ := parseData("testData/xml/valid.xml")
+	if doc.Type != "mainstream" || doc.Forum != "forum" || doc.ForumTitle != "forumtitle" || doc.Language != "turkish" || doc.GMTOffset != "-8" || doc.DiscussionTitle != "Konkoğlu'ndan Taziya Ziyareti" || doc.TopicText != topicText || doc.SpamScore != "0.20" || doc.PostNum != "1" || doc.PostID != "post-1" || doc.PostURL != "http://www.haberler.com/konkoglu-ndan-taziya-ziyareti-8731165-haberi/" || doc.PostDate != "20160826" || doc.PostTime != "time" || doc.Username != "username" || doc.Post != "post" || doc.Signature != "\nsignature\n" || doc.ExternalLinks != "\nlinks\n" || doc.Country != "TR" || doc.MainImage != "http://img.haberler.com/haber/165/konkoglu-ndan-taziya-ziyareti-8731165_ov.jpg" {
+		t.Error("expected match")
+	}
+
+	// invalid document
+	_, err := parseData("testData/xml/invalid.xml")
+	if err == nil {
+		t.Error("expected error")
+	}
+
+	// invalid path
+	_, err = parseData("testData/xml/!@#$%^&*()_+?")
+	if err == nil {
+		t.Error("expected error")
+	}
 }

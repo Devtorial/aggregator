@@ -3,48 +3,60 @@ package main
 import (
 	"archive/zip"
 	"bufio"
+	"encoding/xml"
 	"fmt"
 	"github.com/PuerkitoBio/goquery"
+	"github.com/garyburd/redigo/redis"
 	"github.com/robarchibald/configReader"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
 
-type Aggregator struct {
+type aggregator struct {
+	RedisServer         string
+	RedisPort           string
+	RedisMaxIdle        string
+	RedisMaxConnections string
 }
 
-type Document struct {
+type document struct {
 	Path            string
-	Type            string
-	Forum           string
-	ForumTitle      string
-	DiscussionTitle string
-	Language        string
-	GMTOffset       string
-	TopicURL        string
-	TopicText       string
-	SpamScore       string
-	PostNum         int
-	PostID          string
-	PostURL         string
-	PostDate        string
-	PostTime        string
-	Username        string
-	Post            string
-	Signature       string
-	ExternalLinks   string
-	Country         string
-	MainImage       string
+	XML             string
+	XMLName         xml.Name `xml:"document"`
+	Type            string   `xml:"type"`
+	Forum           string   `xml:"forum"`
+	ForumTitle      string   `xml:"forum_title"`
+	DiscussionTitle string   `xml:"discussion_title"`
+	Language        string   `xml:"language"`
+	GMTOffset       string   `xml:"gmt_offset"`
+	TopicURL        string   `xml:"topic_url"`
+	TopicText       string   `xml:"topic_text"`
+	SpamScore       string   `xml:"spam_score"`
+	PostNum         string   `xml:"post_num"`
+	PostID          string   `xml:"post_id"`
+	PostURL         string   `xml:"post_url"`
+	PostDate        string   `xml:"post_date"`
+	PostTime        string   `xml:"post_time"`
+	Username        string   `xml:"username"`
+	Post            string   `xml:"post"`
+	Signature       string   `xml:"signature"`
+	ExternalLinks   string   `xml:"external_links"`
+	Country         string   `xml:"country"`
+	MainImage       string   `xml:"main_image"`
 }
+
+var pool *redis.Pool
 
 func main() {
-	aggregator := configReader.ReadFile("aggregator.conf", &Aggregator{})
-	fmt.Print(aggregator)
+	var config aggregator
+	configReader.ReadFile("aggregator.conf", &config)
 
 	url := readURL()
 	links, err := getLinks(url)
@@ -52,6 +64,21 @@ func main() {
 		log.Fatal(err)
 	}
 	getFiles(links, "downloads")
+
+	pool = newPool(config.RedisServer, config.RedisPort, config.RedisMaxIdle, config.RedisMaxConnections)
+	defer pool.Close()
+}
+
+func newPool(server, port, maxIdle, maxConnections string) *redis.Pool {
+	idle, _ := strconv.Atoi(maxIdle)
+	maxConn, _ := strconv.Atoi(maxConnections)
+	return &redis.Pool{
+		MaxIdle:   idle,
+		MaxActive: maxConn,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", fmt.Sprintf("%s:%s", server, port))
+		},
+	}
 }
 
 func readURL() string {
@@ -210,7 +237,14 @@ func unzip(src, dest string) ([]string, error) {
 
 func saveToRedis(filename []string) error {
 	for _, file := range filename {
-		err := writeToRedis(parseData(file))
+		if filepath.Ext(file) != ".xml" {
+			return fmt.Errorf("invalid file type")
+		}
+		doc, err := parseData(file)
+		if err != nil {
+			return err
+		}
+		err = writeToRedis(doc)
 		if err != nil {
 			return err
 		}
@@ -218,11 +252,36 @@ func saveToRedis(filename []string) error {
 	return nil
 }
 
-func parseData(path string) *Document {
-	return &Document{Path: path}
+// Parse data to get key data, and to enable saving to JSON
+// or other formats if desired
+func parseData(path string) (*document, error) {
+	doc := document{Path: path}
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	doc.XML = string(data)
+	err = xml.Unmarshal(data, &doc)
+	if err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
-func writeToRedis(data *Document) error {
-	//save
+func writeToRedis(data *document) error {
+	c := pool.Get()
+	defer c.Close()
+
+	// key store to keep track of whether added already
+	v, err := redis.String(c.Do("GET", data.PostURL))
+	if err != nil {
+		return err
+	}
+	// add updated version to List
+	if v != data.XML {
+		c.Do("SET", data.PostURL, data.XML)
+		c.Do("LREM", "NEWS_XML", v) // remove old data
+		c.Do("RPUSH", "NEWS_XML", data.XML)
+	}
 	return nil
 }
