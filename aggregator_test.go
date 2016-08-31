@@ -88,8 +88,20 @@ func TestGetFiles(t *testing.T) {
 }
 
 func TestDownloadUnzipSave(t *testing.T) {
+	downloadBusy = make(chan bool, 100)
+	conn := redigomock.NewConn()
+	pool = newMockPool(conn)
+
+	// fail on redis (zip file is cached)
+	if err := downloadUnzipSave("testData/unzip", "http://test.com/small.zip"); err == nil {
+		t.Error("expected fail on redis")
+	}
+
 	// success
-	if err := downloadUnzipSave("testData/downloadUnzip", "http://www.colorado.edu/conflict/peace/download/peace_essay.ZIP"); err != nil {
+	conn.GenericCommand("GET").ExpectError(redis.ErrNil)
+	conn.GenericCommand("SET").Expect("success")
+	conn.GenericCommand("RPUSH").Expect("success")
+	if err := downloadUnzipSave("testData/unzip", "http://test.com/small.zip"); err != nil {
 		t.Error("expected success", err)
 	}
 
@@ -148,6 +160,7 @@ func TestDownload(t *testing.T) {
 }
 
 func TestUnzip(t *testing.T) {
+	os.RemoveAll("testData/unzip/small") // beginning AND end since another test unzips too
 	// invalid output path
 	results, err := unzip("testdata/unzip/small.zip", "testData/!@#$%^&*()-_=+/\\")
 	if err == nil {
