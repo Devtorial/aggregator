@@ -1,3 +1,6 @@
+
+
+
 # Aggregator
 ### A Go social media aggregator
 
@@ -15,4 +18,6 @@ From a speed perspective, my simple concurrent implementation works fine, but fo
 	 - *xml file* - saves file to Redis
 
 Once at this point, it would be easy to add different handlers for each type of file that needs to be processed. Eventually, it would make sense to make each handler into a micro-service that only knows enough to handle its particular job. By keeping everything small, simple and pluggable, this relatively simple aggregator could be built out to handle any data feed imaginable.
+
+
 
