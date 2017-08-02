@@ -1,7 +1,6 @@
-
-
-
 # Aggregator
+[![Build Status](https://travis-ci.org/Devtorial/aggregator.svg?branch=master)](https://travis-ci.org/Devtorial/aggregator) [![Coverage Status](https://coveralls.io/repos/github/Devtorial/aggregator/badge.svg?branch=master)](https://coveralls.io/github/Devtorial/aggregator?branch=master)
+
 ### A Go social media aggregator
 
 Aggregator is a good example of how concurrency in Go works. Some of the concurrent features it implements include:
